@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1920, height=1080">
+<title>Wereldklok</title>
+
+<!--
+  ============================================================================
+  WERELDKLOK — digital signage (1920x1080) voor Yodeck / Raspberry Pi 4
+  ============================================================================
+
+  AANPASSEN:
+  -> THUISLOCATIE (de grote hero-tijd): zie de constante HOME hieronder in de
+     <script>. Pas { city, region, tz } aan. tz = een IANA-tijdzone, bv.
+     "Europe/Amsterdam".
+
+  -> WERELDSTEDEN (de rij kaarten onderaan): zie de array CITIES hieronder.
+     Elk item is { city: "Naam", tz: "IANA/Tijdzone", lat: .., lon: .. }.
+     lat/lon zijn nodig voor het live weer per stad.
+     Toevoegen / verwijderen / herorden mag vrij; het grid schaalt mee.
+
+  Alle tijden worden live berekend met Intl.DateTimeFormat + IANA-tijdzones,
+  dus automatisch DST-correct. Het weer komt live van Open-Meteo (gratis,
+  geen API-key); valt het netwerk weg, dan tonen de kaarten gewoon zon/maan.
+
+  PERFORMANCE: achtergrond is volledig statisch (gradients + 1x getekende
+  SVG-globe). Alleen entree + ring animeren, en uitsluitend via transform/opacity.
+  ============================================================================
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+
+<style>
+  :root{
+    --bg:#05070e;
+    --txt:#f4f6fb;
+    --txt-dim:#9aa4b6;
+    --txt-faint:#5d6678;
+    --accent:#FF6823;
+    --accent-soft:rgba(255,104,35,.16);
+    --line:rgba(255,255,255,.08);
+    --line-soft:rgba(255,255,255,.05);
+    --mono:"DM Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --display:"Sora",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --sans:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  }
+
+  *{margin:0;padding:0;box-sizing:border-box;}
+
+  html,body{width:1920px;height:1080px;overflow:hidden;}
+
+  body{
+    background-color:var(--bg);
+    color:var(--txt);
+    font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;
+    position:relative;
+    isolation:isolate;
+  }
+
+  /* ---- Achtergrondlagen (volledig statisch) ---- */
+
+  /* aurora-glows + globe-licht */
+  .bg-glow{
+    position:absolute; inset:0; z-index:-3;
+    background:
+      radial-gradient(820px 620px at 12% -8%,  rgba(255,104,35,.20), transparent 60%),
+      radial-gradient(1100px 900px at 108% 116%, rgba(43,86,196,.22), transparent 55%),
+      radial-gradient(700px 700px at 78% 36%,   rgba(54,120,210,.12), transparent 60%),
+      radial-gradient(900px 500px at 50% 128%,  rgba(255,104,35,.07), transparent 60%);
+  }
+  /* fijn dot-grid; de vignet eroverheen vervaagt de randen */
+  .bg-grid{
+    position:absolute; inset:0; z-index:-2;
+    background-image:radial-gradient(rgba(255,255,255,.045) 1px, transparent 1.4px);
+    background-size:46px 46px;
+    opacity:.6;
+  }
+  /* vignet voor diepte */
+  .bg-vignette{
+    position:absolute; inset:0; z-index:-1;
+    background:radial-gradient(130% 120% at 50% 38%, transparent 55%, rgba(0,0,0,.55) 100%);
+  }
+  /* draadframe-globe achter de hero */
+  .globe{
+    position:absolute; z-index:-2;
+    top:-70px; right:60px;
+    width:820px; height:820px;
+    opacity:.9;
+    pointer-events:none;
+  }
+
+  /* ---- Layout ---- */
+  .stage{
+    position:relative; z-index:1;
+    width:1920px; height:1080px;
+    display:flex; flex-direction:column;
+    padding:60px 76px 54px;
+  }
+
+  /* ---- Topbar ---- */
+  .topbar{
+    display:flex; align-items:center; justify-content:space-between;
+    opacity:0; animation:fade .8s ease .1s forwards;
+  }
+  .brand{
+    display:flex; align-items:center; gap:15px;
+    font-family:var(--display); font-weight:700; font-size:20px;
+    letter-spacing:.28em; text-transform:uppercase; color:var(--txt-dim);
+  }
+  .brand .pin{position:relative; width:13px; height:13px;}
+  .brand .pin i{position:absolute; inset:0; border-radius:50%; background:var(--accent);}
+  .brand .pin span{position:absolute; inset:-6px; border-radius:50%; background:var(--accent-soft);}
+  .topbar .utc{
+    display:flex; align-items:center; gap:12px;
+    font-family:var(--mono); font-size:17px; letter-spacing:.1em;
+    color:var(--txt-faint); font-variant-numeric:tabular-nums;
+  }
+  .topbar .utc .tag{
+    color:var(--txt-dim); font-weight:500; letter-spacing:.18em;
+    padding:5px 10px; border:1px solid var(--line); border-radius:8px;
+    background:rgba(255,255,255,.02);
+  }
+
+  /* ---- Hero ---- */
+  .hero{
+    flex:1; display:flex; align-items:center; gap:70px;
+    opacity:0; transform:translateY(20px);
+    animation:rise 1s cubic-bezier(.16,1,.3,1) .15s forwards;
+  }
+
+  .ring{position:relative; width:320px; height:320px; flex:0 0 auto;}
+  .ring > svg{display:block; transform:rotate(-90deg);}
+  .ring .core{
+    position:absolute; inset:0;
+    display:flex; flex-direction:column; align-items:center; justify-content:center; gap:8px;
+  }
+  .ring .core .loc{font-family:var(--display); font-weight:700; font-size:30px;}
+  .ring .core .secs{
+    font-family:var(--mono); font-size:34px; color:var(--accent);
+    letter-spacing:.12em; font-variant-numeric:tabular-nums;
+  }
+  .ring .core .tz{
+    font-size:13px; letter-spacing:.22em; text-transform:uppercase; color:var(--txt-faint);
+  }
+
+  .hero-main{display:flex; flex-direction:column;}
+  .hero-kicker{
+    display:inline-flex; align-self:flex-start; align-items:center; gap:10px;
+    font-family:var(--display); font-weight:600; font-size:16px;
+    letter-spacing:.26em; text-transform:uppercase; color:var(--accent);
+    padding:8px 16px; border:1px solid rgba(255,104,35,.28); border-radius:999px;
+    background:rgba(255,104,35,.07); margin-bottom:18px;
+  }
+  .hero-time{
+    font-family:var(--mono); font-weight:500; font-size:248px; line-height:.9;
+    letter-spacing:-.012em; font-variant-numeric:tabular-nums;
+    display:flex; align-items:baseline;
+  }
+  .hero-time .colon{color:var(--accent); padding:0 .015em; animation:blink 2s steps(1,end) infinite;}
+  .hero-time .sec{
+    font-size:92px; color:var(--accent); margin-left:26px;
+    align-self:flex-end; margin-bottom:34px; letter-spacing:.02em;
+  }
+  .hero-date{margin-top:26px; display:flex; align-items:baseline; gap:20px; flex-wrap:wrap;}
+  .hero-date .day{
+    font-family:var(--display); font-weight:700; font-size:48px;
+    text-transform:capitalize; letter-spacing:.005em;
+  }
+  .hero-date .full{font-size:30px; color:var(--txt-dim); text-transform:capitalize;}
+
+  /* ---- Wereldsteden ---- */
+  .world-head{
+    display:flex; align-items:center; gap:18px; margin-bottom:20px;
+    opacity:0; animation:fade .8s ease .4s forwards;
+  }
+  .world-head .label{
+    font-family:var(--display); font-weight:600; font-size:14px;
+    letter-spacing:.26em; text-transform:uppercase; color:var(--txt-faint);
+  }
+  .world-head .rule{flex:1; height:1px; background:linear-gradient(90deg,var(--line),transparent);}
+
+  .grid{display:grid; grid-auto-flow:column; grid-auto-columns:1fr; gap:20px;}
+
+  .card{
+    contain:layout paint;
+    position:relative; overflow:hidden;
+    border-radius:22px;
+    border:1px solid var(--line);
+    background:linear-gradient(180deg, rgba(255,255,255,.055), rgba(255,255,255,.012));
+    opacity:0; transform:translateY(18px);
+    animation:rise .7s cubic-bezier(.16,1,.3,1) forwards;
+  }
+  .card:nth-child(1){animation-delay:.48s;}
+  .card:nth-child(2){animation-delay:.56s;}
+  .card:nth-child(3){animation-delay:.64s;}
+  .card:nth-child(4){animation-delay:.72s;}
+  .card:nth-child(5){animation-delay:.80s;}
+  .card:nth-child(6){animation-delay:.88s;}
+  .card:nth-child(7){animation-delay:.96s;}
+  .card:nth-child(8){animation-delay:1.04s;}
+
+  /* lucht-band: kleur weerspiegelt het moment van de dag */
+  .sky{
+    position:relative; height:78px;
+    background:linear-gradient(180deg,#0a1234,#141a3e); /* default; JS overschrijft */
+    border-bottom:1px solid rgba(255,255,255,.06);
+  }
+  .sky .horizon{
+    position:absolute; left:0; right:0; bottom:0; height:18px;
+    background:linear-gradient(180deg, transparent, rgba(0,0,0,.28));
+  }
+  /* weer-chip rechtsboven in de band: leesbaar op elke lucht-kleur */
+  .sky .wx{
+    position:absolute; top:14px; right:16px;
+    display:flex; align-items:center; gap:9px;
+    padding:7px 12px 7px 9px; border-radius:13px;
+    background:rgba(7,11,22,.40); border:1px solid rgba(255,255,255,.12);
+  }
+  .sky .wx .celestial{width:30px; height:30px; flex:0 0 auto;}
+  .sky .wx .temp{
+    font-family:var(--mono); font-weight:500; font-size:23px; color:#fff;
+    letter-spacing:.01em; font-variant-numeric:tabular-nums;
+  }
+  .sun-core{fill:#FFD27A;}
+  .sun-ray{stroke:#FFD27A; stroke-width:2.2; stroke-linecap:round;}
+  .moon{fill:#cfdaf2;}
+  .wx-cloud{fill:#dfe6f2;}
+  .wx-cloud-d{fill:#c2ccdd;}
+  .wx-drop{stroke:#7db8f0; stroke-width:2.4; stroke-linecap:round;}
+  .wx-snow{fill:#eaf1ff;}
+  .wx-bolt{fill:#FFD27A;}
+  .wx-fog{stroke:#cfdaf2; stroke-width:2.4; stroke-linecap:round;}
+
+  .card .body{padding:20px 22px 22px;}
+  .card .city{font-family:var(--display); font-weight:700; font-size:24px; letter-spacing:.01em;}
+  .card .offset{
+    font-family:var(--mono); font-size:13px; color:var(--txt-faint);
+    letter-spacing:.05em; margin-top:5px; font-variant-numeric:tabular-nums;
+  }
+  .card .time{
+    margin-top:18px;
+    font-family:var(--mono); font-weight:500; font-size:60px; line-height:1;
+    letter-spacing:-.01em; font-variant-numeric:tabular-nums;
+  }
+  .card .time .c{color:var(--txt-faint);}
+  .card .meta{margin-top:14px; display:flex; align-items:center; justify-content:space-between;}
+  .card .wd{font-size:15px; color:var(--txt-dim); text-transform:capitalize;}
+  .card .ph{
+    font-family:var(--mono); font-size:12px; letter-spacing:.14em;
+    color:var(--txt-faint); padding:4px 9px; border:1px solid var(--line);
+    border-radius:7px; text-transform:uppercase;
+  }
+
+  /* ---- Animaties (alleen transform/opacity) ---- */
+  @keyframes rise{to{opacity:1; transform:translateY(0);}}
+  @keyframes fade{to{opacity:1;}}
+  @keyframes blink{0%,55%{opacity:1;} 56%,100%{opacity:.22;}}
+</style>
+</head>
+<body>
+
+  <div class="bg-glow"></div>
+  <div class="bg-grid"></div>
+  <svg class="globe" id="globe" viewBox="0 0 800 800" aria-hidden="true"></svg>
+  <div class="bg-vignette"></div>
+
+  <div class="stage">
+
+    <div class="topbar">
+      <div class="brand"><span class="pin"><span></span><i></i></span>Wereldklok</div>
+      <div class="utc"><span class="tag">UTC</span><span id="utc">--:--:--</span></div>
+    </div>
+
+    <!-- HERO: thuislocatie -->
+    <div class="hero">
+      <div class="ring" aria-hidden="true">
+        <svg width="320" height="320" viewBox="0 0 320 320">
+          <defs>
+            <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%"  stop-color="#FF8A4D"/>
+              <stop offset="100%" stop-color="#FF5A14"/>
+            </linearGradient>
+          </defs>
+          <circle cx="160" cy="160" r="146" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="7"/>
+          <circle id="ring-prog" cx="160" cy="160" r="146" fill="none"
+                  stroke="url(#ringGrad)" stroke-width="7" stroke-linecap="round"
+                  stroke-dasharray="917.3" stroke-dashoffset="917.3"/>
+          <g id="ring-knob" transform="rotate(0 160 160)">
+            <circle cx="306" cy="160" r="11" fill="rgba(255,104,35,.22)"/>
+            <circle cx="306" cy="160" r="5.5" fill="#FF7A33"/>
+          </g>
+        </svg>
+        <div class="core">
+          <div class="loc" id="home-city">Zwolle</div>
+          <div class="secs" id="home-sec">00</div>
+          <div class="tz" id="home-tz">CET</div>
+        </div>
+      </div>
+
+      <div class="hero-main">
+        <span class="hero-kicker" id="home-kicker">Zwolle &middot; Nederland</span>
+        <div class="hero-time">
+          <span id="h-hh">--</span><span class="colon">:</span><span id="h-mm">--</span><span class="sec" id="h-ss">--</span>
+        </div>
+        <div class="hero-date">
+          <span class="day" id="h-day">&nbsp;</span>
+          <span class="full" id="h-full">&nbsp;</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- WERELDSTEDEN -->
+    <div>
+      <div class="world-head">
+        <span class="label">Wereldsteden</span>
+        <span class="rule"></span>
+      </div>
+      <div class="grid" id="grid"></div>
+    </div>
+
+  </div>
+
+<script>
+"use strict";
+
+/* ===========================================================================
+   HIER PAS JE DE LOCATIES AAN
+   =========================================================================== */
+
+// Thuislocatie = de grote hero-tijd.
+const HOME = { city: "Zwolle", region: "Nederland", tz: "Europe/Amsterdam" };
+
+// Wereldsteden = de rij kaarten. Toevoegen/verwijderen/herorden naar wens.
+// lat/lon zijn nodig voor het live weer (zoek ze bv. op via Google Maps).
+const CITIES = [
+  { city: "Los Angeles", tz: "America/Los_Angeles", lat: 34.05,  lon: -118.24 },
+  { city: "New York",    tz: "America/New_York",     lat: 40.71,  lon: -74.01  },
+  { city: "Londen",      tz: "Europe/London",        lat: 51.51,  lon: -0.13   },
+  { city: "Dubai",       tz: "Asia/Dubai",           lat: 25.20,  lon: 55.27   },
+  { city: "Tokio",       tz: "Asia/Tokyo",           lat: 35.68,  lon: 139.69  },
+  { city: "Sydney",      tz: "Australia/Sydney",     lat: -33.87, lon: 151.21  },
+];
+
+// Live weer via Open-Meteo (gratis, geen API-key). Hoe vaak verversen (minuten):
+const WEATHER_REFRESH_MIN = 15;
+
+/* ===========================================================================
+   Vanaf hier hoef je niets meer aan te passen.
+   =========================================================================== */
+
+const LOCALE = "nl-NL";
+const RING_CIRC = 2 * Math.PI * 146;
+
+const pad = n => String(n).padStart(2,"0");
+
+function partsFmt(tz){
+  return new Intl.DateTimeFormat("en-GB",{timeZone:tz,hour12:false,hour:"2-digit",minute:"2-digit",second:"2-digit"});
+}
+function getHMS(fmt){
+  const o={};
+  for (const p of fmt.formatToParts(new Date())) if(p.type in {hour:1,minute:1,second:1}) o[p.type]=p.value;
+  return {h:+o.hour, m:+o.minute, s:+o.second};
+}
+function offsetString(tz){
+  const dtf=new Intl.DateTimeFormat("en-US",{timeZone:tz,timeZoneName:"shortOffset",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit"});
+  let v=(dtf.formatToParts(new Date()).find(p=>p.type==="timeZoneName")||{}).value||"UTC";
+  v=v.replace(/^GMT/,"UTC"); if(v==="UTC") v="UTC+00:00";
+  return v;
+}
+function shortName(tz){
+  const dtf=new Intl.DateTimeFormat("en-US",{timeZone:tz,timeZoneName:"short",hour:"2-digit"});
+  return (dtf.formatToParts(new Date()).find(p=>p.type==="timeZoneName")||{}).value||"";
+}
+
+/* ---- Moment van de dag -> band-gradient + zon/maan ---- */
+// buckets: night, dawn, day, dusk
+function phaseOf(h){
+  if (h>=5 && h<7)  return "dawn";
+  if (h>=7 && h<17) return "day";
+  if (h>=17 && h<20) return "dusk";
+  return "night";
+}
+const SKY = {
+  night: "linear-gradient(180deg,#070c24 0%,#111a3f 100%)",
+  dawn:  "linear-gradient(180deg,#2a2456 0%,#9d4f63 60%,#f0a25a 100%)",
+  day:   "linear-gradient(180deg,#2f6fb6 0%,#79b2e2 100%)",
+  dusk:  "linear-gradient(180deg,#33285e 0%,#a8455a 55%,#e8763c 100%)",
+};
+const PHASE_LABEL = { night:"NACHT", dawn:"DAGERAAD", day:"DAG", dusk:"SCHEMER" };
+
+function sunSVG(){
+  let rays="";
+  for(let i=0;i<8;i++){
+    const a=i*Math.PI/4;
+    rays+=`<line class="sun-ray" x1="${(20+Math.cos(a)*12).toFixed(1)}" y1="${(20+Math.sin(a)*12).toFixed(1)}" x2="${(20+Math.cos(a)*17).toFixed(1)}" y2="${(20+Math.sin(a)*17).toFixed(1)}"/>`;
+  }
+  return `<svg class="celestial" viewBox="0 0 40 40"><circle class="sun-core" cx="20" cy="20" r="8"/>${rays}</svg>`;
+}
+function moonSVG(){
+  return `<svg class="celestial" viewBox="0 0 40 40"><path class="moon" d="M26 20a10 10 0 1 1-9.3-9.97A7.8 7.8 0 0 0 26 20z"/></svg>`;
+}
+
+/* ---- Weer-iconen (SVG, geen emoji) ---- */
+const W=(inner)=>`<svg class="celestial" viewBox="0 0 40 40">${inner}</svg>`;
+// herbruikbare bouwstenen
+function sunMark(cx,cy,r){
+  let rays="";
+  for(let i=0;i<8;i++){const a=i*Math.PI/4;
+    rays+=`<line class="sun-ray" x1="${(cx+Math.cos(a)*(r+3)).toFixed(1)}" y1="${(cy+Math.sin(a)*(r+3)).toFixed(1)}" x2="${(cx+Math.cos(a)*(r+7)).toFixed(1)}" y2="${(cy+Math.sin(a)*(r+7)).toFixed(1)}"/>`;}
+  return `<circle class="sun-core" cx="${cx}" cy="${cy}" r="${r}"/>${rays}`;
+}
+const moonMark=(cx,cy)=>`<path class="moon" d="M${cx+6} ${cy}a8 8 0 1 1-7.4-7.98A6.2 6.2 0 0 0 ${cx+6} ${cy}z"/>`;
+const cloudPath=(cls)=>`<path class="${cls}" d="M12 30a6.5 6.5 0 0 1-.3-12.99 8 8 0 0 1 15.4-1.2A6 6 0 0 1 30 30z"/>`;
+const drops=(n)=>{let s="";const xs=n===3?[14,20,26]:[15,25];xs.forEach(x=>{s+=`<line class="wx-drop" x1="${x}" y1="31" x2="${x-2}" y2="37"/>`;});return s;};
+const flakes=()=>`<circle class="wx-snow" cx="15" cy="33" r="1.8"/><circle class="wx-snow" cx="22" cy="35" r="1.8"/><circle class="wx-snow" cx="28" cy="33" r="1.8"/>`;
+
+const ICON = {
+  clear:   isDay => W(isDay ? sunMark(20,19,7.5) : moonMark(20,19)),
+  partly:  isDay => W((isDay ? sunMark(15,15,5.5) : moonMark(14,15)) + cloudPath("wx-cloud")),
+  cloud:   () => W(cloudPath("wx-cloud-d") ),
+  fog:     () => W(cloudPath("wx-cloud-d") + `<line class="wx-fog" x1="9" y1="34" x2="31" y2="34"/><line class="wx-fog" x1="12" y1="38" x2="28" y2="38"/>`),
+  rain:    () => W(cloudPath("wx-cloud-d") + drops(3)),
+  drizzle: () => W(cloudPath("wx-cloud-d") + drops(2)),
+  snow:    () => W(cloudPath("wx-cloud-d") + flakes()),
+  thunder: () => W(cloudPath("wx-cloud-d") + `<path class="wx-bolt" d="M21 30l-5 7h4l-2 6 7-9h-4l3-4z"/>`),
+};
+const COND_NL = {
+  clear:"Helder", partly:"Half bewolkt", cloud:"Bewolkt", fog:"Mist",
+  drizzle:"Motregen", rain:"Regen", snow:"Sneeuw", thunder:"Onweer",
+};
+// WMO weercode -> icoon/omschrijving-categorie
+function wmoKind(code){
+  if(code===0) return "clear";
+  if(code===1||code===2) return "partly";
+  if(code===3) return "cloud";
+  if(code===45||code===48) return "fog";
+  if(code>=51&&code<=57) return "drizzle";
+  if((code>=61&&code<=67)||(code>=80&&code<=82)) return "rain";
+  if((code>=71&&code<=77)||code===85||code===86) return "snow";
+  if(code>=95) return "thunder";
+  return "cloud";
+}
+
+/* ---- Draadframe-globe (1x getekend, statisch) ---- */
+(function buildGlobe(){
+  const R=300, cx=400, cy=400;
+  const NS="http://www.w3.org/2000/svg";
+  const svg=document.getElementById("globe");
+
+  const defs=document.createElementNS(NS,"defs");
+  defs.innerHTML=`<radialGradient id="glow" cx="50%" cy="42%" r="60%">
+      <stop offset="0%" stop-color="rgba(70,120,220,.16)"/>
+      <stop offset="55%" stop-color="rgba(70,120,220,.05)"/>
+      <stop offset="100%" stop-color="rgba(70,120,220,0)"/>
+    </radialGradient>`;
+  svg.appendChild(defs);
+
+  const glow=document.createElementNS(NS,"circle");
+  glow.setAttribute("cx",cx); glow.setAttribute("cy",cy); glow.setAttribute("r",R+70);
+  glow.setAttribute("fill","url(#glow)");
+  svg.appendChild(glow);
+
+  const mk=(tag,attrs)=>{const e=document.createElementNS(NS,tag);for(const k in attrs)e.setAttribute(k,attrs[k]);return e;};
+  const stroke="rgba(150,180,235,.13)", strokeHi="rgba(255,104,35,.22)";
+
+  // omtrek
+  svg.appendChild(mk("circle",{cx,cy,r:R,fill:"none",stroke,"stroke-width":1.4}));
+  // breedtecirkels
+  [-60,-30,0,30,60].forEach(lat=>{
+    const rad=lat*Math.PI/180, ry=R*Math.cos(rad)*0.32, y=cy-R*Math.sin(rad), rx=R*Math.cos(rad);
+    svg.appendChild(mk("ellipse",{cx,cy:y,rx,ry,fill:"none",stroke:lat===0?strokeHi:stroke,"stroke-width":lat===0?1.6:1.1}));
+  });
+  // meridianen
+  [25,50,75,90].forEach((deg,i)=>{
+    const rx=R*Math.cos(deg*Math.PI/180);
+    const rxx = deg===90 ? R : rx;
+    svg.appendChild(mk("ellipse",{cx,cy,rx:rxx,ry:R,fill:"none",stroke:i===0?strokeHi:stroke,"stroke-width":i===0?1.5:1.1}));
+  });
+  svg.appendChild(mk("ellipse",{cx,cy,rx:R*Math.cos(50*Math.PI/180),ry:R,fill:"none",stroke,"stroke-width":1.1}));
+})();
+
+/* ---- Kaarten 1x opbouwen; daarna alleen textContent ---- */
+const grid=document.getElementById("grid");
+const cells=CITIES.map(c=>{
+  const el=document.createElement("div");
+  el.className="card";
+  el.innerHTML=`
+    <div class="sky" data-sky>
+      <div class="horizon"></div>
+      <div class="wx"><span data-icon></span><span class="temp" data-temp>--&deg;</span></div>
+    </div>
+    <div class="body">
+      <div class="city">${c.city}</div>
+      <div class="offset" data-off>UTC</div>
+      <div class="time"><span data-hh>--</span><span class="c">:</span><span data-mm>--</span></div>
+      <div class="meta"><span class="wd" data-wd>&nbsp;</span><span class="ph" data-ph></span></div>
+    </div>`;
+  grid.appendChild(el);
+  return {
+    cfg:c, fmt:partsFmt(c.tz),
+    wdFmt:new Intl.DateTimeFormat(LOCALE,{timeZone:c.tz,weekday:"short"}),
+    sky:el.querySelector("[data-sky]"),
+    iconSlot:el.querySelector("[data-icon]"),
+    temp:el.querySelector("[data-temp]"),
+    hh:el.querySelector("[data-hh]"), mm:el.querySelector("[data-mm]"),
+    wd:el.querySelector("[data-wd]"), off:el.querySelector("[data-off]"),
+    ph:el.querySelector("[data-ph]"),
+    _phase:null, _off:null, _iconKey:null,
+    wxCode:null, wxTemp:null, isDay:true,
+  };
+});
+
+/* ---- Hero refs ---- */
+const homeParts=partsFmt(HOME.tz);
+const homeDay=new Intl.DateTimeFormat(LOCALE,{timeZone:HOME.tz,weekday:"long"});
+const homeFull=new Intl.DateTimeFormat(LOCALE,{timeZone:HOME.tz,day:"numeric",month:"long",year:"numeric"});
+const utcEl=document.getElementById("utc");
+const ringProg=document.getElementById("ring-prog");
+const ringKnob=document.getElementById("ring-knob");
+const hHH=document.getElementById("h-hh"), hMM=document.getElementById("h-mm"), hSS=document.getElementById("h-ss");
+const hDay=document.getElementById("h-day"), hFull=document.getElementById("h-full");
+const homeSec=document.getElementById("home-sec");
+
+document.getElementById("home-city").textContent=HOME.city;
+document.getElementById("home-kicker").innerHTML=`${HOME.city} &middot; ${HOME.region}`;
+document.getElementById("home-tz").textContent=shortName(HOME.tz);
+
+let lastDay="";
+
+function render(){
+  const now=new Date();
+
+  // hero
+  const t=getHMS(homeParts);
+  hHH.textContent=pad(t.h); hMM.textContent=pad(t.m); hSS.textContent=pad(t.s);
+  homeSec.textContent=pad(t.s);
+  const frac=t.s/60;
+  ringProg.style.strokeDashoffset=(RING_CIRC*(1-frac)).toFixed(1);
+  ringKnob.setAttribute("transform",`rotate(${(frac*360).toFixed(2)} 160 160)`);
+
+  const dayKey=homeFull.format(now);
+  if(dayKey!==lastDay){
+    lastDay=dayKey;
+    hDay.textContent=homeDay.format(now);
+    hFull.textContent=dayKey;
+    document.getElementById("home-tz").textContent=shortName(HOME.tz);
+  }
+
+  utcEl.textContent=`${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+
+  // steden
+  for(const c of cells){
+    const ct=getHMS(c.fmt);
+    c.hh.textContent=pad(ct.h); c.mm.textContent=pad(ct.m);
+    c.wd.textContent=c.wdFmt.format(now);
+    c.isDay = ct.h>=6 && ct.h<18;
+
+    // lucht-band kleurt naar het moment van de dag
+    const phase=phaseOf(ct.h);
+    if(phase!==c._phase){c._phase=phase; c.sky.style.background=SKY[phase];}
+
+    // icoon + omschrijving: weer indien bekend, anders zon/maan-terugval
+    const kind = (c.wxCode!=null) ? wmoKind(c.wxCode) : "fallback";
+    const iconKey = kind + (c.isDay?"d":"n");
+    if(iconKey!==c._iconKey){
+      c._iconKey=iconKey;
+      if(kind==="fallback"){
+        c.iconSlot.innerHTML = c.isDay ? sunSVG() : moonSVG();
+        c.ph.textContent = PHASE_LABEL[phase];
+      }else{
+        c.iconSlot.innerHTML = ICON[kind](c.isDay);
+        c.ph.textContent = COND_NL[kind];
+      }
+    }
+
+    const off=offsetString(c.cfg.tz);
+    if(off!==c._off){c._off=off; c.off.textContent=off;}
+  }
+}
+
+/* ---- Live weer (Open-Meteo, geen API-key) ---- */
+function applyTemp(c){
+  c.temp.textContent = (c.wxTemp!=null) ? `${c.wxTemp}°` : "--°";
+}
+async function fetchWeather(c){
+  const url=`https://api.open-meteo.com/v1/forecast?latitude=${c.cfg.lat}&longitude=${c.cfg.lon}`
+           +`&current=temperature_2m,weather_code`;
+  try{
+    const r=await fetch(url,{cache:"no-store"});
+    if(!r.ok) throw 0;
+    const j=await r.json();
+    c.wxTemp=Math.round(j.current.temperature_2m);
+    c.wxCode=j.current.weather_code;
+    c._iconKey=null;            // forceer her-render van het icoon
+    applyTemp(c);
+  }catch(e){ /* netwerk weg: terugval blijft staan */ }
+}
+function refreshWeather(){ cells.forEach(fetchWeather); }
+refreshWeather();
+setInterval(refreshWeather, WEATHER_REFRESH_MIN*60*1000);
+
+/* ---- Tik uitgelijnd op de seconde-grens van de systeemklok ---- */
+function tick(){
+  render();
+  setTimeout(tick, 1000-(Date.now()%1000));
+}
+tick();
+</script>
+</body>
+</html>
