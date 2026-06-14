@@ -629,11 +629,14 @@ function tick(){
 }
 tick();
 
-/* ---- Schaal de 1920x1080-compositie zodat hij op elk scherm past ---- */
+/* ---- Vul het hele scherm (geen zwarte balken) ----
+   X en Y onafhankelijk schalen zodat de compositie het scherm exact vult,
+   ongeacht de verhouding. Op een 16:9-scherm (bv. 1080p) is dit pixel-perfect;
+   bij een afwijkende verhouding rekt hij minimaal mee i.p.v. balken te tonen. */
 const scaler=document.getElementById("scaler");
 function fitScreen(){
-  const s=Math.min(window.innerWidth/1920, window.innerHeight/1080);
-  scaler.style.transform=`translate(-50%,-50%) scale(${s})`;
+  const sx=window.innerWidth/1920, sy=window.innerHeight/1080;
+  scaler.style.transform=`translate(-50%,-50%) scale(${sx},${sy})`;
 }
 window.addEventListener("resize", fitScreen);
 fitScreen();
