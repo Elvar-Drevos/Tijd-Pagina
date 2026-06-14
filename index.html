@@ -50,14 +50,22 @@
 
   *{margin:0;padding:0;box-sizing:border-box;}
 
-  html,body{width:1920px;height:1080px;overflow:hidden;}
+  html,body{width:100%; height:100%; overflow:hidden;}
 
   body{
     background-color:var(--bg);
     color:var(--txt);
     font-family:var(--sans);
     -webkit-font-smoothing:antialiased;
-    position:relative;
+  }
+
+  /* De hele compositie is ontworpen op 1920x1080 en wordt als geheel
+     geschaald zodat hij op elk scherm past (JS zet de schaal). */
+  .scaler{
+    position:absolute; top:50%; left:50%;
+    width:1920px; height:1080px;
+    transform:translate(-50%,-50%) scale(1);
+    transform-origin:center center;
     isolation:isolate;
   }
 
@@ -262,6 +270,7 @@
 </style>
 </head>
 <body>
+ <div class="scaler" id="scaler">
 
   <div class="bg-glow"></div>
   <div class="bg-grid"></div>
@@ -324,6 +333,8 @@
 
   </div>
 
+ </div>
+
 <script>
 "use strict";
 
@@ -365,16 +376,23 @@ function getHMS(fmt){
   for (const p of fmt.formatToParts(new Date())) if(p.type in {hour:1,minute:1,second:1}) o[p.type]=p.value;
   return {h:+o.hour, m:+o.minute, s:+o.second};
 }
+// UTC-offset zelf berekenen (geen "shortOffset"-optie, die ontbreekt op
+// oudere Chromium zoals op de Yodeck-speler). Werkt overal + is DST-correct.
+function offsetMinutes(tz, date){
+  const dtf=new Intl.DateTimeFormat("en-US",{timeZone:tz,hour12:false,
+    year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  const p={}; for(const x of dtf.formatToParts(date)) p[x.type]=x.value;
+  let hh=+p.hour; if(hh===24) hh=0;
+  const asUTC=Date.UTC(+p.year,+p.month-1,+p.day,hh,+p.minute,+p.second);
+  return Math.round((asUTC-date.getTime())/60000);
+}
 function offsetString(tz){
-  const dtf=new Intl.DateTimeFormat("en-US",{timeZone:tz,timeZoneName:"shortOffset",year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit"});
-  let v=(dtf.formatToParts(new Date()).find(p=>p.type==="timeZoneName")||{}).value||"UTC";
-  v=v.replace(/^GMT/,"UTC"); if(v==="UTC") v="UTC+00:00";
-  return v;
+  const m=offsetMinutes(tz,new Date());
+  const sign=m<0?"-":"+", a=Math.abs(m);
+  return `UTC${sign}${pad(Math.floor(a/60))}:${pad(a%60)}`;
 }
-function shortName(tz){
-  const dtf=new Intl.DateTimeFormat("en-US",{timeZone:tz,timeZoneName:"short",hour:"2-digit"});
-  return (dtf.formatToParts(new Date()).find(p=>p.type==="timeZoneName")||{}).value||"";
-}
+// Korte label voor de hero (bv. "UTC+02:00").
+function shortName(tz){ return offsetString(tz); }
 
 /* ---- Moment van de dag -> band-gradient + zon/maan ---- */
 // buckets: night, dawn, day, dusk
@@ -604,11 +622,21 @@ refreshWeather();
 setInterval(refreshWeather, WEATHER_REFRESH_MIN*60*1000);
 
 /* ---- Tik uitgelijnd op de seconde-grens van de systeemklok ---- */
+// try/catch zodat een onverwachte fout de klok nooit kan stilzetten.
 function tick(){
-  render();
+  try{ render(); }catch(e){}
   setTimeout(tick, 1000-(Date.now()%1000));
 }
 tick();
+
+/* ---- Schaal de 1920x1080-compositie zodat hij op elk scherm past ---- */
+const scaler=document.getElementById("scaler");
+function fitScreen(){
+  const s=Math.min(window.innerWidth/1920, window.innerHeight/1080);
+  scaler.style.transform=`translate(-50%,-50%) scale(${s})`;
+}
+window.addEventListener("resize", fitScreen);
+fitScreen();
 </script>
 </body>
 </html>
